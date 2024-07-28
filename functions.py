@@ -54,9 +54,11 @@ import torch
 
 from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts, CosineAnnealingLR, ReduceLROnPlateau
 from warmup_scheduler import GradualWarmupScheduler
+from sklearn.metrics import fbeta_score
 
 #| export
 def cpu_stats():
+    """Returns CPU memory usage"""
     pid = os.getpid()
     py = psutil.Process(pid)
     memory_use = py.memory_info()[0] / 2. ** 30
@@ -78,7 +80,7 @@ def detect_env():
 
 # | export
 def get_paths(run_env = "local_nb"):
-    """Returns data, models, and log folder paths based on your where you are running the code"""
+    """Returns data, models, and log folder paths based on where you are running the code"""
     if run_env == "kaggle":
         path_main = path_data = Path(f"/kaggle/input/vesuvius-challenge-ink-detection")
         path_working = Path("/kaggle/working/outputs/")
@@ -111,6 +113,7 @@ def get_paths(run_env = "local_nb"):
 
 #| export
 class CFG:
+    """Configs class to set parameters used in preprocessing and training the model"""
     def __init__(self):
         self.random_seed = 4321
         self.subset = 1.0
@@ -164,26 +167,6 @@ def get_valid_aug_resize(img_size, in_chans): return albumentations.Compose([
     ToTensorV2(transpose_mask=True)
 ], p=1.)
 
-
-def get_train_aug_brightness(img_size, in_chans): return albumentations.Compose([
-    albumentations.Resize(img_size, img_size),
-    albumentations.RandomBrightnessContrast(p = 0.5),
-    albumentations.HueSaturationValue(p = 0.5),
-    albumentations.Normalize(mean = [0] * in_chans, std = [1] * in_chans),
-    ToTensorV2(transpose_mask=True)
-])
-
-def get_train_aug_bright_dropout_geom_blur(img_size, in_chans): return albumentations.Compose([
-    albumentations.Resize(img_size, img_size),
-    albumentations.RandomBrightnessContrast(p = 0.5),
-    albumentations.HorizontalFlip(p=0.5),
-    albumentations.Blur(p = 0.5),
-    albumentations.CoarseDropout(p = 0.5),
-    albumentations.ShiftScaleRotate(p=0.5, rotate_limit=15),
-    albumentations.Normalize(mean = [0] * in_chans, std = [1] * in_chans),
-    ToTensorV2(transpose_mask=True)
-])
-
 def get_train_aug_public_baseline(img_size, in_chans):  return albumentations.Compose([
     albumentations.Resize(img_size, img_size),
     albumentations.HorizontalFlip(p=0.5),
@@ -203,19 +186,14 @@ def get_train_aug_public_baseline(img_size, in_chans):  return albumentations.Co
 ])
 
 def get_train_transforms(cfg):
-    
+    """
+    Define the transformations performed on training data
+    Currently used to implement image augmentations
+    """
     # augmentations
     #---------------------
-    if cfg.augment == "basic":
-        get_train_aug = get_train_aug_resize
-    elif cfg.augment == "brightness":
-        get_train_aug = get_train_aug_brightness
-#     elif cfg.augment == "geometry":
-#         get_train_aug = get_train_aug_geometry
-    elif cfg.augment == "baseline":
+    if cfg.augment == "baseline":
         get_train_aug = get_train_aug_public_baseline
-    elif cfg.augment == "bright_dropout_geom_blur":
-        get_train_aug = get_train_aug_bright_dropout_geom_blur
     else:
         get_train_aug = get_train_aug_resize
         
@@ -223,6 +201,7 @@ def get_train_transforms(cfg):
     return get_train_aug(cfg.img_size, cfg.frag_len)
 
 def get_valid_transforms(cfg):
+    """Define transformations needed for the validation set. Currently only resizes images"""
     get_valid_aug = get_valid_aug_resize
     return get_valid_aug(cfg.img_size, cfg.frag_len)
 
@@ -247,19 +226,6 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
         
-        
-
-def init_logger(log_file):
-    from logging import getLogger, INFO, FileHandler, Formatter, StreamHandler
-    logger = getLogger(__name__)
-    logger.setLevel(INFO)
-    handler1 = StreamHandler()
-    handler1.setFormatter(Formatter("%(message)s"))
-    handler2 = FileHandler(filename=log_file)
-    handler2.setFormatter(Formatter("%(message)s"))
-    logger.addHandler(handler1)
-    logger.addHandler(handler2)
-    return logger
 
 def set_seed(seed=None, cudnn_deterministic=True):
     if seed is None:
@@ -275,7 +241,7 @@ def set_seed(seed=None, cudnn_deterministic=True):
 
 
 def make_dirs(cfg):
-    
+    """Creates folder for where to save model based on """
     for dir in [CFG.model_dir, CFG.figures_dir, CFG.submission_dir, CFG.log_dir]:
         os.makedirs(dir, exist_ok=True)
         
@@ -284,14 +250,20 @@ def cfg_init(cfg, mode='train'):
 
 #| export
 
-def read_image_mask(CFG, fragment_id, path_train): ##Reads an individual mask framgment
+def read_image_mask(CFG, fragment_id, path_train): 
+    """"
+    For an indiviudal fragment id, reads in the individual image slices based on config parameters
+    """
 
     images = []
 
+    #Define the start and end image indices based on config file
     start = CFG.frag_min
     end = CFG.frag_min + CFG.frag_len
     idxs = range(start, end)
 
+
+    #read in each image and pad depending tile size so we can get even strides
     for i in tqdm(idxs):
 
         image_path = str(path_train / f"{fragment_id}/surface_volume/{i:02}.tif")
@@ -303,26 +275,39 @@ def read_image_mask(CFG, fragment_id, path_train): ##Reads an individual mask fr
         image = np.pad(image, [(0, pad0), (0, pad1)], constant_values=0)
 
         images.append(image)
+    
+    #stack all the images together 
     images = np.stack(images, axis=2)
 
+    #read in the  the labeled fragment of where there is ink and where there is not ink
     mask_path = str(path_train / f"{fragment_id}/inklabels.png")
     mask = cv2.imread(mask_path, 0)
     mask = np.pad(mask, [(0, pad0), (0, pad1)], constant_values=0)
 
+    #normalize between 0 - 1
     mask = mask.astype('float32')
     mask /= 255.0
     
+    #Reads in the mask which outlines what part of the pictures is a fragment vs not a fragment
+    # In other words, part of the picture where there could be ink  
     label_path = str(path_train / f"{fragment_id}/mask.png")
     label = cv2.imread(label_path, 0)
     label = np.pad(label, [(0, pad0), (0, pad1)], constant_values=0)
 
+    #normalize between 0 - 1
     label = label.astype('float32')
     label /= 255.0
     
     return images, mask, label.astype('int8')
 
 def read_all_fragments(CFG, path_train): #Gets training/val data 
+    """ 
+    For each of the 3 fragments, does the following:
+        1. Calls the read_image_mask function which reads in the predifined number of slices for each fragment, its mask, and its labels
+        2. Breaks each fragment id into smaller tiles. This will increase the amount of training data and reduce memory requirements
     
+     """
+
     full_images = []
     full_masks = []
     full_xyxys = []
@@ -333,23 +318,27 @@ def read_all_fragments(CFG, path_train): #Gets training/val data
         masks = []
         xyxys = []
         
+        #Read in the fragement based on id
         image, mask, label = read_image_mask(CFG, fragment_id, path_train)
 
+        #Calculate the starting x and y cordinates for each tile 
         x1_list = list(range(0, image.shape[1]-CFG.tile_size+1, CFG.stride))
         y1_list = list(range(0, image.shape[0]-CFG.tile_size+1, CFG.stride))
 
+        #For a given fragment, iterate through the tiles
         for y1 in y1_list:
             for x1 in x1_list:
-                y2 = y1 + CFG.tile_size
+                #Calculate the ending x and y cordinate for each tie
+                y2 = y1 + CFG.tile_size 
                 x2 = x1 + CFG.tile_size
-                # xyxys.append((x1, y1, x2, y2))
                 
-                if np.max(label[y1:y2, x1:x2]) == 1: #we have ink here
-                    images.append(image[y1:y2, x1:x2])
-                    masks.append(mask[y1:y2, x1:x2, None])
-                    xyxys.append([x1, y1, x2, y2])
+                #for a given tile (x1, x2, y1, y2), check to see if the tile has a fragment piece in it
+                if np.max(label[y1:y2, x1:x2]) == 1: 
+                    images.append(image[y1:y2, x1:x2]) #Save the 3d slices of the tile down - this will be our input data
+                    masks.append(mask[y1:y2, x1:x2, None]) #Save the labeled image down
+                    xyxys.append([x1, y1, x2, y2]) #Save the cordinates down
         
-        
+        #append all the tiles of each fragment id together 
         full_images.append(images)
         full_masks.append(masks)
         full_xyxys.append(xyxys)
@@ -362,6 +351,8 @@ def read_all_fragments(CFG, path_train): #Gets training/val data
 #| export
 
 def get_transforms(data, cfg): 
+    """Define the transformation functions we want to apply to each image"""
+
     if data == 'train':
         aug = get_train_transforms(cfg)
     elif data == 'valid':
@@ -371,6 +362,9 @@ def get_transforms(data, cfg):
     return aug
 
 class CustomDataset(Dataset):
+    """
+    Class to define dataloader
+    """
     def __init__(self, images, cfg, labels=None, transform=None):
         self.images = images
         self.cfg = cfg
@@ -378,7 +372,6 @@ class CustomDataset(Dataset):
         self.transform = transform
 
     def __len__(self):
-        # return len(self.df)
         return len(self.images)
 
     def __getitem__(self, idx):
@@ -396,12 +389,19 @@ class CustomDataset(Dataset):
 #| export
   
 def create_dataloaders_new(CFG, full_images, full_masks, full_xyxys, valid_id):
+    """
+    Function to define train / validation dataloaders based on which fragment id is imputed as the valid_id
+
+    """
+
+    #Get validation images
     valid_id_int = int(valid_id) - 1
     
     valid_images = full_images[valid_id_int]
     valid_masks = full_masks[valid_id_int]
     valid_xyxys  = full_xyxys[valid_id_int]
     
+    #Get training images 
     if valid_id_int == 0:
         train_images = full_images[1] + full_images[2]
         train_masks = full_masks[1] + full_masks[2]
@@ -412,15 +412,13 @@ def create_dataloaders_new(CFG, full_images, full_masks, full_xyxys, valid_id):
         train_images = full_images[0] + full_images[1]
         train_masks = full_masks[0] + full_masks[1]  
     
-    #train_images, train_masks, valid_images, valid_masks, valid_xyxys = get_train_valid_dataset(valid_id)
-    #valid_xyxys = np.stack(valid_xyxys)
-    
+    #Create dataset based on train / validation data
     train_dataset = CustomDataset(
     train_images, CFG, labels=train_masks, transform=get_transforms(data='train', cfg=CFG))
     valid_dataset = CustomDataset(
         valid_images, CFG, labels=valid_masks, transform=get_transforms(data='valid', cfg=CFG))
 
-
+    #Create dataloaders based on training data and validation data
     train_loader = DataLoader(train_dataset,
                               batch_size=CFG.bs,
                               shuffle=True,
@@ -431,8 +429,6 @@ def create_dataloaders_new(CFG, full_images, full_masks, full_xyxys, valid_id):
                               shuffle=False,
                               num_workers=CFG.num_workers, pin_memory=True, drop_last=False)
     
-    #print(len(train_loader))
-    #print(len(valid_loader))
     return train_loader, valid_loader, valid_xyxys
 
 
@@ -450,7 +446,14 @@ def valid_mask_gt_func(fragment_id, path_train, CFG):
 
 #| export
 class CustomModel(nn.Module):
+    """
+    Custom model class. Currently only supports Unet architecture
+    """
+
     def __init__(self, cfg, weight=None):
+        """
+        Initialized the model based on configs parameters / inputted weights
+        """
         super().__init__()
         self.cfg = cfg
 
@@ -458,19 +461,26 @@ class CustomModel(nn.Module):
             encoder_name=cfg.checkpoint, 
             encoder_weights=weight,
             in_channels=cfg.frag_len,
-            classes=1, #hard coding for now 
+            classes=1,
             activation=None,
         )
 
     def forward(self, image):
+        """
+        Defines forward pass 
+        """
         output = self.encoder(image)
         # output = output.squeeze(-1)
         return output
 
 
 def build_model(cfg, weight="imagenet"):
-    print('model_name', "Unet") #used to be cfg.model_name
-    print('checkpoint', cfg.checkpoint)
+    """
+    Initializes model based on cfg file and imagenet pretrained weights
+    """
+
+    # print('model_name', "Unet") 
+    # print('checkpoint', cfg.checkpoint)
 
     model = CustomModel(cfg, weight)
 
@@ -478,6 +488,10 @@ def build_model(cfg, weight="imagenet"):
 
 #| export
 def initalize_model(device, CFG):
+    """
+    Initializes model, optimizer (AdamW), and learning rate scheduler based on configs
+    """
+
     model = build_model(CFG)
     model.to(device)
 
@@ -487,7 +501,7 @@ def initalize_model(device, CFG):
 
 class GradualWarmupSchedulerV2(GradualWarmupScheduler):
     """
-    https://www.kaggle.com/code/underwearfitting/single-fold-training-of-resnet200d-lb0-965
+    Defines learning rate scheduler. Pulled from this kaggle notebook: https://www.kaggle.com/code/underwearfitting/single-fold-training-of-resnet200d-lb0-965
     """
     def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
         super(GradualWarmupSchedulerV2, self).__init__(
@@ -508,6 +522,11 @@ class GradualWarmupSchedulerV2(GradualWarmupScheduler):
             return [base_lr * ((self.multiplier - 1.) * self.last_epoch / self.total_epoch + 1.) for base_lr in self.base_lrs]
 
 def get_scheduler(cfg, optimizer):
+    """
+    Defines scheduler based on cfg file.
+    Currently supports two options: Cosine scheduler or the scheduler defined in GradualWarmupSchedulerV2
+    """
+
     scheduler_cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, cfg.n_epochs, eta_min=1e-7)
     scheduler = GradualWarmupSchedulerV2(
@@ -523,17 +542,26 @@ def get_scheduler(cfg, optimizer):
     return ret_scheduler
 
 def scheduler_step(scheduler, avg_val_loss, epoch):
-    scheduler.step(epoch)
+    """
+    Adjusts the learning rate at the end of each epoch
+    """
+    scheduler.step()
+    #scheduler.step(epoch) #apparently being deprecated
 
 
 #| export
 
 def criterion(y_pred, y_true):
+    """Use Binary Cross Entroypy as loss function"""
     BCELoss = smp.losses.SoftBCEWithLogitsLoss()
     return BCELoss(y_pred, y_true)
 
 #| export
 def train_fn(train_loader, model, criterion, optimizer, device, CFG):
+    """
+    Performs one pass through of the training data, calculates loss, and calculates gradients
+    """
+
     model.train()
 
     scaler = GradScaler(enabled=CFG.use_amp)
@@ -561,6 +589,9 @@ def train_fn(train_loader, model, criterion, optimizer, device, CFG):
     return losses.avg
 
 def valid_fn(valid_loader, model, criterion, device, valid_xyxys, valid_mask_gt, CFG):
+    """
+    Calculates validation loss and reconstructs entire fragment to see how we would do in leaderboard
+    """
     mask_pred = np.zeros(valid_mask_gt.shape)
     mask_count = np.zeros(valid_mask_gt.shape)
 
@@ -590,11 +621,9 @@ def valid_fn(valid_loader, model, criterion, device, valid_xyxys, valid_mask_gt,
     return losses.avg, mask_pred
 
 #| export
-from sklearn.metrics import fbeta_score
-
-def fbeta_numpy(targets, preds, beta=0.5, smooth=1e-5):
+def dice_numpy(targets, preds, beta=0.5, smooth=1e-5):
     """
-    https://www.kaggle.com/competitions/vesuvius-challenge-ink-detection/discussion/397288
+    Dice coefficient calculations based on: https://www.kaggle.com/competitions/vesuvius-challenge-ink-detection/discussion/397288
     """
     y_true_count = targets.sum()
     ctp = preds[targets==1].sum()
@@ -607,18 +636,24 @@ def fbeta_numpy(targets, preds, beta=0.5, smooth=1e-5):
 
     return dice
 
-def calc_fbeta(mask, mask_pred):
+def calc_dice(mask, mask_pred):
+    """
+    For a given mask and predicted mask, calculate the dice coefficient.
+    This is used in validation.
+    """
     mask = mask.astype(int).flatten()
     mask_pred = mask_pred.flatten()
 
     best_th = 0
     best_dice = 0
-    dice = fbeta_numpy(mask, (mask_pred >= 0.5).astype(int), beta=0.5)
+    dice = dice_numpy(mask, (mask_pred >= 0.5).astype(int), beta=0.5)
     
     best_dice = dice
     best_th = 0.5 #assumed this is 0.5 vs iterating over different thresholds
     
 # Commented this out to save memory 
+# Previously this was used to determine what was the best threshold to determine whether a pixel had ink or not
+# Tests showed it was typically around .5, so commenting out to save memory / time
 #     for th in np.array(range(10, 50+1, 5)) / 100:
         
 #         # dice = fbeta_score(mask, (mask_pred >= th).astype(int), beta=0.5)
@@ -634,33 +669,15 @@ def calc_fbeta(mask, mask_pred):
     return best_dice, best_th
 
 
-def calc_cv(mask_gt, mask_pred):
-    best_dice, best_th = calc_fbeta(mask_gt, mask_pred)
-
-    return best_dice, best_th
-
-#| export
-
 def train_one_fold(CFG, full_images, full_masks, full_xyxys, fold, device, path_train, path_test, path_models, path_logs, path_working): #Inputs are config file, underlying data, and fold num 
+    """
+    Perform training on one fold of cross validation.
+    """
     
-    
+    #initialize variables to keep track of performance
     best_score = -1
-    # timing
-    start_all = time.time()
-    
     best_epoch_num = 0
-
-#     run_id = CFG.run_id
-#     grid_id = CFG.grid_id
-
-    #full_images, full_masks, full_xyxys = read_all_fragments() #reads and puts all fragments in list
-    #Note the above code ^^^^ doesnt need to be re-initalized every fold.
-    ###Maybe we create it in pre-proc and just pass it thru
-
-    train_loader, valid_loader, valid_xyxys = create_dataloaders_new(CFG, full_images ,full_masks ,full_xyxys, fold) 
-    valid_mask_gt = valid_mask_gt_func(fold, path_train, CFG) #Get validation mask
-    model, optimizer, scheduler = initalize_model(device, CFG)
-    
+   
     epoc_count_l = []
     train_loss_l = []
     val_loss_l = []
@@ -669,54 +686,62 @@ def train_one_fold(CFG, full_images, full_masks, full_xyxys, fold, device, path_
     best_epoch_l = []
     epoch_time_l = []
     fold_list_l = []
+
+    # timing
+    start_all = time.time()
     
+    
+
+#     run_id = CFG.run_id
+#     grid_id = CFG.grid_id
+
+
+    #create training and validation dataloaders based on preprocessed data
+    train_loader, valid_loader, valid_xyxys = create_dataloaders_new(CFG, full_images ,full_masks ,full_xyxys, fold) 
+
+    #Get validation mask
+    valid_mask_gt = valid_mask_gt_func(fold, path_train, CFG) 
+
+    #initialize model, optimizer, scheduler
+    model, optimizer, scheduler = initalize_model(device, CFG)
+    
+    
+    
+    #Perform n_epochs of training 
     for epoch in range(CFG.n_epochs):
 
             start_time = time.time()
 
-            # train
+            # train model
             avg_loss = train_fn(train_loader, model, criterion, optimizer, device, CFG)
 
-            print(f'post training {fold}: {cpu_stats()}')
-            # eval
-            avg_val_loss, mask_pred = valid_fn(
-                valid_loader, model, criterion, device, valid_xyxys, valid_mask_gt, CFG)
+            # calculate the validation set loss
+            avg_val_loss, mask_pred = valid_fn(valid_loader, model, criterion, device, valid_xyxys, valid_mask_gt, CFG)
 
+            #change learning rate based on scheduler
             scheduler_step(scheduler, avg_val_loss, epoch)
 
-            print(f'model end training cv: {cpu_stats()}')
-            best_dice, best_th = calc_cv(valid_mask_gt, mask_pred)
+            #Calculate dice for entire mask, not just singular tile and then average
+            best_dice, best_th = calc_dice(valid_mask_gt, mask_pred)
 
-            print(f'finished calc cv: {cpu_stats()}')
             # score = avg_val_loss
             score = best_dice
 
             elapsed = time.time() - start_time
 
-#             Logger.info(
-#                 f'Epoch {epoch+1} - avg_train_loss: {avg_loss:.4f}  avg_val_loss: {avg_val_loss:.4f}  time: {elapsed:.0f}s')
-#             # Logger.info(f'Epoch {epoch+1} - avgScore: {avg_score:.4f}')
-#             Logger.info(
-#                 f'Epoch {epoch+1} - avgScore: {score:.4f}')
-
-
+            #update best variables if we improved dice coeff
             update_best = score > best_score
-
             if update_best:
                 best_loss = avg_val_loss
                 best_score = score
                 best_epoch_num = epoch
-#                 Logger.info(
-#                     f'Epoch {epoch+1} - Save Best Score: {best_score:.4f} Model')
-#                 Logger.info(
-#                     f'Epoch {epoch+1} - Save Best Loss: {best_loss:.4f} Model')
 
-                print(f'saving model: {cpu_stats()}')
+                #if the model improved, save it down
                 torch.save({'model': model.state_dict(),
                             'preds': mask_pred},
                             path_models / f'Unet_fold{fold}_best.pth')
-                print(f'model saved: {cpu_stats()}')
 
+            #save down model performance stats
             epoc_count_l.append(epoch)
             train_loss_l.append(avg_loss)
             val_loss_l.append(avg_val_loss)
@@ -726,8 +751,8 @@ def train_one_fold(CFG, full_images, full_masks, full_xyxys, fold, device, path_
             epoch_time_l.append(elapsed)
             fold_list_l.append(fold)
             
-            
-    base_df = pd.DataFrame( #Create DF based on training data 
+    #Create DF based on training data 
+    base_df = pd.DataFrame( 
         list(zip(epoc_count_l ,train_loss_l ,val_loss_l ,val_dice_l ,best_dice_score_l ,best_epoch_l ,epoch_time_l, fold_list_l )),
                       
         columns = ['epoc_count','train_loss','val_loss','val_dice','best_dice','best_epoch','epoch_time', 'fold_number'])
@@ -741,17 +766,24 @@ def train_one_fold(CFG, full_images, full_masks, full_xyxys, fold, device, path_
              
 
 #| export
-def run_grid(cfg):
-    #cfg = CFG()
+def run_training(cfg):
+    """
+    Takes in cfg, performs preprocessing, and then performs training based o
+    """
+
     cfg_init(cfg)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
-    path_train, path_test, path_models, path_logs, path_working = get_paths(detect_env())  #Gets our paths
+    #Gets our paths
+    path_train, path_test, path_models, path_logs, path_working = get_paths(detect_env())  
     
-    full_images, full_masks, full_xyxys = read_all_fragments(cfg, path_train) #Preprocessing, read in the fragments
+    #Preprocessing, read in the fragments
+    full_images, full_masks, full_xyxys = read_all_fragments(cfg, path_train)
     
     log_df_all = None
-    for fold in cfg.frag_sel: #valid_set is for the framgments we want to use in validation
+
+    #valid_set is for the framgments we want to use in validation
+    for fold in cfg.frag_sel: 
         log_df = train_one_fold(cfg, full_images, full_masks, full_xyxys, fold, device,
                                path_train, path_test, path_models, path_logs, path_working) #Does one round of training
         
