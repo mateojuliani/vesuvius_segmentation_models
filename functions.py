@@ -57,6 +57,7 @@ from warmup_scheduler import GradualWarmupScheduler
 from sklearn.metrics import fbeta_score
 
 #| export
+#utils
 def cpu_stats():
     """Returns CPU memory usage"""
     pid = os.getpid()
@@ -65,6 +66,7 @@ def cpu_stats():
     return 'memory GB:' + str(np.round(memory_use, 2))
 
 #| export
+#utils
 def detect_env():
     """A helper function that detects where you are running code"""
     if os.environ.get("KAGGLE_KERNEL_RUN_TYPE", False):
@@ -79,6 +81,7 @@ def detect_env():
     return run_env        
 
 # | export
+#utils
 def get_paths(run_env = "local_nb"):
     """Returns data, models, and log folder paths based on where you are running the code"""
     if run_env == "kaggle":
@@ -112,6 +115,7 @@ def get_paths(run_env = "local_nb"):
 
 
 #| export
+#cfg
 class CFG:
     """Configs class to set parameters used in preprocessing and training the model"""
     def __init__(self):
@@ -185,6 +189,7 @@ def get_train_aug_public_baseline(img_size, in_chans):  return albumentations.Co
     ToTensorV2(transpose_mask=True)
 ])
 
+#preprc
 def get_train_transforms(cfg):
     """
     Define the transformations performed on training data
@@ -207,6 +212,7 @@ def get_valid_transforms(cfg):
 
 
 #| export
+#utils
 class AverageMeter(object):
     """Computes and stores the average and current value"""
 
@@ -226,7 +232,7 @@ class AverageMeter(object):
         self.avg = self.sum / self.count
 
         
-
+#utils
 def set_seed(seed=None, cudnn_deterministic=True):
     if seed is None:
         seed = 42
@@ -239,17 +245,17 @@ def set_seed(seed=None, cudnn_deterministic=True):
     torch.backends.cudnn.deterministic = cudnn_deterministic
     torch.backends.cudnn.benchmark = False
 
-
+#utls
 def make_dirs(cfg):
     """Creates folder for where to save model based on """
     for dir in [CFG.model_dir, CFG.figures_dir, CFG.submission_dir, CFG.log_dir]:
         os.makedirs(dir, exist_ok=True)
-        
+#utils       
 def cfg_init(cfg, mode='train'):
     set_seed(cfg.random_seed)
 
 #| export
-
+#preproc
 def read_image_mask(CFG, fragment_id, path_train): 
     """"
     For an indiviudal fragment id, reads in the individual image slices based on config parameters
@@ -300,6 +306,7 @@ def read_image_mask(CFG, fragment_id, path_train):
     
     return images, mask, label.astype('int8')
 
+#preproc
 def read_all_fragments(CFG, path_train): #Gets training/val data 
     """ 
     For each of the 3 fragments, does the following:
@@ -349,7 +356,7 @@ def read_all_fragments(CFG, path_train): #Gets training/val data
     return full_images, full_masks, full_xyxys
 
 #| export
-
+#utils
 def get_transforms(data, cfg): 
     """Define the transformation functions we want to apply to each image"""
 
@@ -361,6 +368,7 @@ def get_transforms(data, cfg):
     # print(aug)
     return aug
 
+#dataloaders
 class CustomDataset(Dataset):
     """
     Class to define dataloader
@@ -386,7 +394,7 @@ class CustomDataset(Dataset):
         return image, label
 
 
-#| export
+#| export dataloaders
   
 def create_dataloaders_new(CFG, full_images, full_masks, full_xyxys, valid_id):
     """
@@ -432,7 +440,7 @@ def create_dataloaders_new(CFG, full_images, full_masks, full_xyxys, valid_id):
     return train_loader, valid_loader, valid_xyxys
 
 
-#| export
+#| export utils
 def valid_mask_gt_func(fragment_id, path_train, CFG):
     valid_mask_path = str(path_train / f"{fragment_id}/inklabels.png")
     valid_mask_gt = cv2.imread(valid_mask_path, 0)
