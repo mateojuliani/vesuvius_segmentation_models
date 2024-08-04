@@ -1,8 +1,12 @@
-
 import utils
 import preproc 
 import dataloaders 
-import model 
+import model as m
+from tqdm.auto import tqdm
+import torch
+import time
+import numpy as np
+import pandas as pd
 
 from torch.cuda.amp import autocast, GradScaler
 
@@ -149,7 +153,7 @@ def train_one_fold(CFG, full_images, full_masks, full_xyxys, fold, device, path_
     valid_mask_gt = utils.valid_mask_gt_func(fold, path_train, CFG) 
 
     #initialize model, optimizer, scheduler
-    model, optimizer, scheduler = model.initalize_model(device, CFG)
+    model, optimizer, scheduler = m.initalize_model(device, CFG)
     
     #Perform n_epochs of training 
     for epoch in range(CFG.n_epochs):
@@ -157,13 +161,13 @@ def train_one_fold(CFG, full_images, full_masks, full_xyxys, fold, device, path_
             start_time = time.time()
 
             # train model
-            avg_loss = train_fn(train_loader, model, model.criterion, optimizer, device, CFG)
+            avg_loss = train_fn(train_loader, model, m.criterion, optimizer, device, CFG)
 
             # calculate the validation set loss
-            avg_val_loss, mask_pred = valid_fn(valid_loader, model, model.criterion, device, valid_xyxys, valid_mask_gt, CFG)
+            avg_val_loss, mask_pred = valid_fn(valid_loader, model, m.criterion, device, valid_xyxys, valid_mask_gt, CFG)
 
             #change learning rate based on scheduler
-            model.scheduler_step(scheduler, avg_val_loss, epoch)
+            m.scheduler_step(scheduler, avg_val_loss, epoch)
 
             #Calculate dice for entire mask, not just singular tile and then average
             best_dice, best_th = calc_dice(valid_mask_gt, mask_pred)
@@ -218,7 +222,7 @@ def run_training(cfg):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     #Gets our paths
-    path_train, path_test, path_models, path_logs, path_working = get_paths(detect_env())  
+    path_train, path_test, path_models, path_logs, path_working = utils.get_paths(utils.detect_env())  
     
     #Preprocessing, read in the fragments
     full_images, full_masks, full_xyxys = preproc.read_all_fragments(cfg, path_train)

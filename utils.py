@@ -1,4 +1,3 @@
-
 import os
 import numpy as np
 import torch
@@ -9,10 +8,6 @@ import random
 import psutil
 from pathlib import Path
 import cv2
-
-
-
-
 
 
 def set_seed(seed=None, cudnn_deterministic=True):

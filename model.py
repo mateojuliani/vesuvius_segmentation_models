@@ -117,19 +117,3 @@ def criterion(y_pred, y_true):
     return BCELoss(y_pred, y_true)
 
 
-#| export
-def dice_numpy(targets, preds, beta=0.5, smooth=1e-5):
-    """
-    Dice coefficient calculations based on: https://www.kaggle.com/competitions/vesuvius-challenge-ink-detection/discussion/397288
-    For the competition, this is used as the scoring metric
-    """
-    y_true_count = targets.sum()
-    ctp = preds[targets==1].sum()
-    cfp = preds[targets==0].sum()
-    beta_squared = beta * beta
-
-    c_precision = ctp / (ctp + cfp + smooth)
-    c_recall = ctp / (y_true_count + smooth)
-    dice = (1 + beta_squared) * (c_precision * c_recall) / (beta_squared * c_precision + c_recall + smooth)
-
-    return dice
